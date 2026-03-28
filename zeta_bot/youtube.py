@@ -17,6 +17,8 @@ async def get_info(ytb_url):
         'format': 'bestaudio/best',
         'extract_flat': True,
         "quiet": True,
+        "cookiefile": "./configs/cookies.txt",
+        "js_runtimes": {"node": {}},
     }
 
     await console.rp(f"开始提取信息：{ytb_url}", f"[{level}]")
@@ -58,6 +60,8 @@ async def audio_download(youtube_url, info_dict, download_path, download_type="y
         "outtmpl": video_path,
         "extract_flat": True,
         "quiet": True,
+        "cookiefile": "./configs/cookies.txt",
+        "js_runtimes": {"node": {}},
     }
 
     await console.rp(f"开始下载：{video_path_title}.{video_name_extension}", f"[{level}]")
@@ -89,6 +93,8 @@ async def search(query, query_num=5) -> list:
         'default_search': "ytsearch",
         'extract_flat': True,
         "quiet": True,
+        "cookiefile": "./configs/cookies.txt",
+        "js_runtimes": {"node": {}},
     }
 
     if query == "":

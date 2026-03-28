@@ -25,3 +25,6 @@ log/
 logs/
 config/
 configs/
+zeta_bot/__pycache__/
+CLAUDE.md
+test_output.json

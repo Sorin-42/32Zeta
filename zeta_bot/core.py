@@ -85,7 +85,8 @@ from zeta_bot import (
     guild,
     audio,
     playlist,
-    ai
+    ai,
+    web_server
 )
 from zeta_bot.help import HelpMenuView
 
@@ -236,6 +237,11 @@ async def on_ready():
 
     # 初始化主音频库
     await audio_lib_main.initialize()
+
+    # 启动Web控制面板
+    web_server.init(bot, bot.loop, guild_lib, audio_lib_main, ffmpeg_path)
+    web_server.start(port=5000)
+    await console.rp("Web控制面板已启动：http://localhost:5000", "[系统]")
 
     # 设置机器人状态
     bot_activity_type = discord.ActivityType.playing
@@ -743,6 +749,28 @@ async def shutdown(ctx):
     await shutdown_callback(ctx)
 
 
+@bot.slash_command(description="获取Web控制面板的登录验证码")
+@option(
+    "days", int,
+    description="验证码有效天数（默认3天）",
+    required=False,
+    min_value=1,
+    max_value=30,
+)
+async def webauth(ctx: discord.ApplicationContext, days: int = 3):
+    if not await command_check(ctx):
+        return
+    code, validity = web_server.generate_auth_code(ctx.user.id, str(ctx.user), days)
+    await ctx.respond(
+        f"🔐 **Web控制面板验证码**\n"
+        f"```\n{code}\n```\n"
+        f"请在浏览器中打开控制面板并输入此验证码登录\n"
+        f"有效期：**{validity}天**\n"
+        f"⚠️ 请勿将此验证码分享给他人",
+        ephemeral=True
+    )
+
+
 async def info_callback(ctx: discord.ApplicationContext) -> None:
     """
     显示关于信息
@@ -1081,6 +1109,104 @@ async def play_next(ctx: discord.ApplicationContext) -> None:
     else:
         await console.rp("播放队列已结束", ctx.guild)
         await ctx.send("播放队列已结束")
+
+    await current_guild.refresh_list_view()
+
+
+# 播放时间追踪 与 Seek偏移 (Web UI用)
+import time as _time
+_playback_state = {}   # guild_id -> {"start": float, "offset": float, "total": int, "title": str}
+_seek_offsets = {}     # guild_id -> seconds (consumed by play_next_from_guild)
+
+
+def playback_track_start(guild_id, title, total_duration, offset=0):
+    _playback_state[guild_id] = {
+        "start": _time.time(), "offset": offset,
+        "total": total_duration, "title": title
+    }
+
+
+def playback_track_pause(guild_id):
+    st = _playback_state.get(guild_id)
+    if st and "paused_at" not in st:
+        st["paused_at"] = _time.time()
+
+
+def playback_track_resume(guild_id):
+    st = _playback_state.get(guild_id)
+    if st and "paused_at" in st:
+        paused_dur = _time.time() - st["paused_at"]
+        st["start"] += paused_dur
+        del st["paused_at"]
+
+
+def playback_get_position(guild_id):
+    st = _playback_state.get(guild_id)
+    if not st:
+        return 0, 0
+    if "paused_at" in st:
+        elapsed = st["paused_at"] - st["start"] + st["offset"]
+    else:
+        elapsed = _time.time() - st["start"] + st["offset"]
+    return min(int(elapsed), st["total"]), st["total"]
+
+
+def playback_track_stop(guild_id):
+    _playback_state.pop(guild_id, None)
+
+
+async def play_next_from_guild(discord_guild) -> None:
+    """
+    Web UI版本的play_next，使用discord.Guild对象而非ctx
+    """
+    voice_client = discord_guild.voice_client
+    guild_id = discord_guild.id
+    if guild_id not in guild_lib._guild_dict:
+        return
+    current_guild = guild_lib._guild_dict[guild_id]
+    current_playlist = current_guild.get_playlist()
+
+    await console.rp(f"触发 play_next_from_guild", discord_guild)
+
+    # 检查是否是seek操作（不移除当前音频）
+    seek_offset = _seek_offsets.pop(guild_id, None)
+
+    if seek_offset is not None:
+        # Seek: 不移除音频，从指定位置重新播放
+        if len(current_playlist) > 0:
+            current_audio = current_playlist.get_audio(0)
+            before_options = f"-ss {seek_offset}"
+            voice_client.play(
+                discord.PCMVolumeTransformer(
+                    discord.FFmpegPCMAudio(
+                        executable=ffmpeg_path, source=current_audio.get_path(),
+                        before_options=before_options
+                    )
+                ),
+                after=lambda e: asyncio.run_coroutine_threadsafe(play_next_from_guild(discord_guild), bot.loop)
+            )
+            voice_client.source.volume = current_guild.get_voice_volume() / 100.0
+            playback_track_start(guild_id, current_audio.get_title(), current_audio.get_duration(), offset=seek_offset)
+        return
+
+    # 正常流程：移除已完成的音频
+    finished_audio = current_playlist.pop_audio(0)
+    audio_lib_main.unlock_audio(f"{guild_id}_NOW_PLAYING", finished_audio)
+    playback_track_stop(guild_id)
+
+    if len(current_playlist) > 0:
+        next_audio = current_playlist.get_audio(0)
+        audio_lib_main.lock_audio(f"{guild_id}_NOW_PLAYING", next_audio)
+        voice_client.play(
+            discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(executable=ffmpeg_path, source=next_audio.get_path())
+            ),
+            after=lambda e: asyncio.run_coroutine_threadsafe(play_next_from_guild(discord_guild), bot.loop)
+        )
+        voice_client.source.volume = current_guild.get_voice_volume() / 100.0
+        playback_track_start(guild_id, next_audio.get_title(), next_audio.get_duration())
+    else:
+        await console.rp("播放队列已结束", discord_guild)
 
     await current_guild.refresh_list_view()
 
